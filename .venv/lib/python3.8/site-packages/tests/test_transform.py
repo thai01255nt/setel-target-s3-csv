@@ -1,0 +1,208 @@
+import unittest
+from singer import transform
+from singer.transform import *
+
+
+class TestTransform(unittest.TestCase):
+    def test_integer_transform(self):
+        schema = {'type': 'integer'}
+        self.assertEqual(123, transform(123, schema))
+        self.assertEqual(123, transform('123', schema))
+        self.assertEqual(1234, transform('1,234', schema))
+
+    def test_nested_transform(self):
+        schema =  {"type": "object",
+                   "properties": {"addrs": {"type": "array",
+                                            "items": {"type": "object",
+                                                      "properties": {"addr1": {"type": "string"},
+                                                                     "city": {"type": "string"},
+                                                                     "state": {"type": "string"},
+                                                                     'amount': {'type': 'integer'}}}}}}
+        data = {'addrs': [{'amount': '123'}, {'amount': '456'}]}
+        expected = {'addrs': [{'amount': 123}, {'amount': 456}]}
+        self.assertDictEqual(expected, transform(data, schema))
+
+    def test_null_transform(self):
+        self.assertEqual('', transform('', {'type': ['null', 'string']}))
+        self.assertEqual('', transform('', {'type': [ 'string', 'null']}))
+        self.assertEqual(None, transform(None, {'type': [ 'string', 'null']}))
+        self.assertEqual(None, transform('', {'type': ['null']}))
+        self.assertEqual(None, transform(None, {'type': ['null']}))
+
+    def test_datetime_transform(self):
+        schema = {"type": "string", "format": "date-time"}
+        string_datetime = "2017-01-01T00:00:00Z"
+        transformed_string_datetime = "2017-01-01T00:00:00.000000Z"
+        self.assertEqual(transformed_string_datetime, transform(string_datetime, schema, NO_INTEGER_DATETIME_PARSING))
+        self.assertEqual('1970-01-02T00:00:00.000000Z', transform(86400, schema, UNIX_SECONDS_INTEGER_DATETIME_PARSING))
+        self.assertEqual(transformed_string_datetime, transform(string_datetime, schema, UNIX_SECONDS_INTEGER_DATETIME_PARSING))
+        self.assertEqual('1970-01-01T00:01:26.400000Z', transform(86400, schema, UNIX_MILLISECONDS_INTEGER_DATETIME_PARSING))
+        self.assertEqual(transformed_string_datetime, transform(string_datetime, schema, UNIX_MILLISECONDS_INTEGER_DATETIME_PARSING))
+
+        trans = Transformer(NO_INTEGER_DATETIME_PARSING)
+        self.assertIsNone(trans._transform_datetime('cat'))
+        self.assertIsNone(trans._transform_datetime(0))
+
+        trans.integer_datetime_fmt = UNIX_SECONDS_INTEGER_DATETIME_PARSING
+        self.assertIsNone(trans._transform_datetime('cat'))
+
+    def test_datetime_fractional_seconds_transform(self):
+        schema = {"type": "string", "format": "date-time"}
+        string_datetime = "2017-01-01T00:00:00.123000Z"
+        self.assertEqual(string_datetime, transform(string_datetime, schema, NO_INTEGER_DATETIME_PARSING))
+
+    def test_anyof_datetime(self):
+        schema = {'anyOf': [{'type': 'null'}, {'format': 'date-time', 'type': 'string'}]}
+        string_datetime = '2016-03-10T18:47:20Z'
+        transformed_string_datetime = '2016-03-10T18:47:20.000000Z'
+        self.assertEqual(transformed_string_datetime, transform(string_datetime, schema))
+        self.assertIsNone(transform(None, schema))
+
+    def test_error_path(self):
+        schema = {"type": "object",
+                  "properties": {"foo": {"type": "integer"},
+                                 "baz": {"type": "integer"}}}
+        data = {"foo": "bar", "baz": 1}
+        trans = Transformer(NO_INTEGER_DATETIME_PARSING)
+        success, data = trans.transform_recur(data, schema, [])
+        self.assertFalse(success)
+        self.assertIsNone(data)
+        self.assertListEqual([[], ["foo"]], sorted(e.path for e in trans.errors))
+
+    def test_nested_error_path_throws(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "key1": {
+                    "type": "object",
+                    "properties": {
+                        "key2": {
+                            "type": "object",
+                            "properties": {
+                                "key3": {
+                                    "type": "object",
+                                    "properties": {
+                                        "key4": {"type": "integer"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        data = {"key1": {"key2": {"key3": {"key4": "not an integer"}}}}
+        trans = Transformer()
+        success, _ = trans.transform_recur(data, schema, [])
+        self.assertFalse(success)
+        expected = [
+            [],
+            ['key1'],
+            ['key1', 'key2'],
+            ['key1', 'key2', 'key3'],
+            ['key1', 'key2', 'key3', 'key4'],
+        ]
+        self.assertListEqual(expected, sorted(e.path for e in trans.errors))
+
+    def test_nested_error_path_no_throw(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "key1": {
+                    "type": "object",
+                    "properties": {
+                        "key2": {
+                            "type": "object",
+                            "properties": {
+                                "key3": {
+                                    "type": "object",
+                                    "properties": {
+                                        "key4": {"type": "string"},
+                                        "key5": {"type": "string"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        data = {"key1": {"key2": {"key3": {"key4": None, "key5": None}}}}
+        trans = Transformer()
+        success, data = trans.transform_recur(data, schema, [])
+        self.assertFalse(success)
+        self.assertIsNone(data)
+        expected = [
+            [],
+            ['key1'],
+            ['key1', 'key2'],
+            ['key1', 'key2', 'key3'],
+            ['key1', 'key2', 'key3', 'key4'],
+            ['key1', 'key2', 'key3', 'key5'],
+        ]
+        self.assertListEqual(expected, sorted(e.path for e in trans.errors))
+
+    def test_error_path_array(self):
+        schema =  {"type": "object",
+                   "properties": {"integers": {"type": "array",
+                                               "items": {"type": "integer"}}}}
+        data = {"integers": [1, 2, "not an integer", 4, "also not an integer"]}
+        trans = Transformer()
+        success, data = trans.transform_recur(data, schema, [])
+        self.assertFalse(success)
+        expected = [
+            [],
+            ['integers'],
+            ['integers', 2],
+            ['integers', 4],
+        ]
+        self.assertListEqual(expected, sorted(e.path for e in trans.errors))
+
+    def test_nested_error_path_array(self):
+        schema =  {"type": "object",
+                   "properties": {"lists_of_integers": {"type": "array",
+                                                        "items": {"type": "array",
+                                                                  "items": {"type": "integer"}}}}}
+        data = {"lists_of_integers": [[1, "not an integer"], [2, 3], ["also not an integer", 4]]}
+        trans = Transformer()
+        success, transformed_data = trans.transform_recur(data, schema, [])
+        self.assertFalse(success)
+        expected = [
+            [],
+            ['lists_of_integers'],
+            ['lists_of_integers', 0],
+            ['lists_of_integers', 0, 1],
+            ['lists_of_integers', 2],
+            ['lists_of_integers', 2, 0],
+        ]
+        self.assertListEqual(expected, sorted(e.path for e in trans.errors))
+
+    def test_error_path_datetime(self):
+        schema = {"type": "object",
+                  "properties": {"good_datetime": {"type": "string", "format": "date-time"},
+                                 "bad_datetime1": {"type": "string", "format": "date-time"},
+                                 "bad_datetime2": {"type": "string", "format": "date-time"}}}
+        data = {"good_datetime": "2017-04-11T16:07:00Z",
+                "bad_datetime1": "not a datetime",
+                "bad_datetime2": 1}
+        trans = Transformer()
+        success, transformed_data = trans.transform_recur(data, schema, [])
+        self.assertFalse(success)
+        expected = [
+            [],
+            ['bad_datetime1'],
+            ['bad_datetime2'],
+        ]
+        self.assertListEqual(expected, sorted(e.path for e in trans.errors))
+
+    def test_unexpected_object_properties(self):
+        schema = {"type": "object",
+                  "properties": {"good_property": {"type": "string"}}}
+        data = {"good_property": "expected data",
+                "bad_property": "unexpected data"}
+        trans = Transformer()
+        success, transformed_data = trans.transform_recur(data, schema, [])
+        self.assertTrue(success)
+        self.assertDictEqual({"good_property": "expected data"}, transformed_data)
+        self.assertSetEqual(set(["bad_property"]), trans.removed)
+        self.assertListEqual([], trans.errors)

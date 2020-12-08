@@ -1,0 +1,4 @@
+pipelinewise-singer-python==1.*
+inflection==0.3.1
+boto3==1.9.57
+pipelinewise-target-s3-csv==1.*

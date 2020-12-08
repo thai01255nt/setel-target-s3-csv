@@ -1,0 +1,4 @@
+
+          [console_scripts]
+          target-s3-csv=target_s3_csv:main
+       
